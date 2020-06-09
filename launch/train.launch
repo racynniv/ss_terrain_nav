@@ -1,0 +1,6 @@
+<launch>
+  <node pkg="ss_terrain_nav" type="navigate" name="navigate"/>
+  <node pkg="ss_terrain_nav" type="3d_points" name="3d_points"/>
+  <node pkg="ss_terrain_nav" type="explore" name="explore" output="screen"/>
+  <node pkg="rosbag" type="record" args="-o $(find ss_terrain_nav)/bagFiles/ /accelerationVec /camera/color/image /camera/depth/points /camera/depth/image /global_points /tf /stopSimulation /startSimulation --duration=30m" name="rosbag"/>
+</launch>

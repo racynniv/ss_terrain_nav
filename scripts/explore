@@ -1,0 +1,130 @@
+#!/usr/bin/env python
+
+from rospy.numpy_msg import numpy_msg
+from rospy_tutorials.msg import Floats
+
+from std_msgs.msg import Bool
+from geometry_msgs.msg import Point, Vector3
+from tf2_msgs.msg import TFMessage
+
+import numpy as np
+import rospy
+import random
+from scipy.spatial.transform import Rotation as R
+
+max_x = 4.5
+min_x = -4.5
+max_y = 4.5
+min_y = -4.5
+x = 0
+y = 0
+
+last_x = 0
+last_y = 0
+last_z = 0
+last_t = 0
+landed = False
+
+startPub = rospy.Publisher("/startSimulation",Bool,queue_size=100)
+stopPub = rospy.Publisher("/stopSimulation",Bool,queue_size=100)
+closePub = rospy.Publisher("/closeToGoal",Bool,queue_size=100)
+
+def pick_random(max_x, min_x, max_y, min_y):
+  x = random.uniform(max_x, min_x)
+  y = random.uniform(max_y, min_y)
+  return x,y
+  
+"""
+def callback_accel(msg):
+  global startPub
+  global stopPub
+  global closePub
+  x = msg.x
+  y = msg.y
+  z = msg.z
+  acceptable_angle = 80*np.pi/180
+  
+  xy_dist = np.sqrt(x**2 + y**2)
+  angle = np.arctan2(xy_dist,np.abs(z))
+  
+  if angle > acceptable_angle:
+    stopPub.publish(True)
+    closePub.publish(True)
+    rospy.sleep(1)
+    startPub.publish(True)
+"""
+  
+def callback_close(msg):
+  close = msg.data
+  pub = rospy.Publisher("/gps_point",Point,queue_size=100)
+  global x
+  global y
+  
+  if close:
+    x,y = pick_random(max_x, min_x, max_y, min_y)
+  
+  msg = Point()
+  msg.x = x
+  msg.y = y
+  msg.z = 0
+  pub.publish(msg)
+  
+def callback_loc(data):
+  global startPub
+  global stopPub
+  global closePub
+  global last_x
+  global last_y
+  global last_z
+  global last_t
+  global landed
+  if data.transforms[0].child_frame_id == 'ackerman':
+    if data.transforms[0].header.stamp.secs - last_t > 1.5:
+      x = data.transforms[0].transform.translation.x
+      y = data.transforms[0].transform.translation.y
+      z = data.transforms[0].transform.translation.z
+      r_x = data.transforms[0].transform.rotation.x
+      r_y = data.transforms[0].transform.rotation.y
+      r_z = data.transforms[0].transform.rotation.z
+      r_w = data.transforms[0].transform.rotation.w
+      
+      r = R.from_quat([r_x,r_y,r_z,r_w])
+      forward_d = r.apply([1,0,0])
+      up_d = r.apply([0,0,1])
+      
+      acceptable_angle = 80*np.pi/180
+  
+      xy_dist = np.sqrt(up_d[0]**2 + up_d[1]**2)
+      angle = np.arctan2(xy_dist,up_d[2])
+      
+      x_dif = x - last_x
+      y_dif = y - last_y
+      z_dif = z - last_z
+      delta_d = np.sqrt(x_dif**2 + y_dif**2 + z_dif**2)
+      travel_d = np.array([x_dif, y_dif, z_dif])
+      travel_d = travel_d/np.linalg.norm(travel_d)
+      dot_prod = np.dot(forward_d,travel_d)
+      
+      last_x = x
+      last_y = y
+      last_z = z
+      last_t = data.transforms[0].header.stamp.secs
+      if delta_d < .05 or dot_prod < .93 or angle > acceptable_angle:
+        if landed:
+          stopPub.publish(True)
+          closePub.publish(True)
+          rospy.sleep(1)
+          last_t += 3
+          landed = False
+          startPub.publish(True)
+        else:
+          landed = True
+  
+  
+if __name__=='__main__':
+  rospy.init_node('pick_points')
+  rospy.Subscriber('/closeToGoal',Bool,callback_close)
+  #rospy.Subscriber('/accelerationVec',Vector3,callback_accel)
+  rospy.Subscriber("/tf",TFMessage,callback_loc)
+  rospy.spin()
+  

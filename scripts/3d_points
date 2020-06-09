@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+PKG = 'ss_terrain_nav'
+import roslib; roslib.load_manifest(PKG)
+
+import rospy
+import ros_numpy
+from scipy.spatial.transform import Rotation as R
+from rospy.numpy_msg import numpy_msg
+from rospy_tutorials.msg import Floats
+
+from sensor_msgs.msg import PointCloud2
+from tf2_msgs.msg import TFMessage
+from sensor_msgs.msg import Image
+
+import numpy as np
+import cv2
+from cv_bridge import CvBridge, CvBridgeError
+
+trans = np.array([])
+quat = np.array([])
+rquat = np.array([])
+
+near_clip = .01
+far_clip = 3.5
+v_res = 640
+u_res = 480
+focal_length = 57 * 3.14/180
+dists = np.empty((v_res*u_res*4))
+
+v_arr = np.repeat(np.reshape(np.sin((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
+u_arr = np.repeat(np.reshape(np.sin((np.arange(u_res)-u_res/2)*focal_length/u_res),(u_res,1)),v_res,axis=1)
+
+def H_mult(self, quaternion0, quaternion1):
+    x0, y0, z0, w0 = np.split(quaternion0, 4, axis=-1)
+    x1, y1, z1, w1 = np.split(quaternion1, 4, axis=-1)
+    return np.concatenate(
+        (x1*w0 + y1*z0 - z1*y0 + w1*x0,
+         -x1*z0 + y1*w0 + z1*x0 + w1*y0,
+         x1*y0 - y1*x0 + z1*w0 + w1*z0,
+         -x1*x0 - y1*y0 - z1*z0 + w1*w0),
+        axis=-1)
+
+def callback_loc(data):
+  global trans
+  global quat
+  global rquat
+  if data.transforms[0].child_frame_id == 'kinect':
+    loc_x = data.transforms[0].transform.translation.x
+    loc_y = data.transforms[0].transform.translation.y
+    loc_z = data.transforms[0].transform.translation.z
+    rot_x = data.transforms[0].transform.rotation.x
+    rot_y = data.transforms[0].transform.rotation.y
+    rot_z = data.transforms[0].transform.rotation.z
+    rot_w = data.transforms[0].transform.rotation.w
+    trans = np.array([loc_x, loc_y, loc_z])
+    quat = np.array([rot_w, rot_x, rot_y, rot_z])
+    rquat = np.array([rot_w, -rot_x, -rot_y, -rot_z])
+  
+def callback_depth(msg):
+  global trans
+  global quat
+  global rquat
+  global u_arr
+  global v_arr
+  global dists
+  near_clip = .01
+  far_clip = 3.5
+  v_res = 640
+  u_res = 480
+  focal_length = 57 * 3.14/180
+  bridge = CvBridge()
+  depth = bridge.imgmsg_to_cv2(msg,'16UC1')
+  print(depth.shape)
+  depth = np.reshape(np.asarray(depth),(u_res,v_res))
+  array = np.zeros((u_res,v_res,4))
+  array[:,:,3] = far_clip * depth + near_clip
+  array[:,:,1] = np.multiply(array[:,:,3],u_arr)
+  array[:,:,2] = np.multiply(array[:,:,3],v_arr)
+  dists = H_mult(None,H_mult(None,quat, array),rquat)
+  dists = np.reshape(dists,(480,640,4))
+  dists = dists[:,:,1:] + trans
+  dists = dists.astype(np.float32)
+  dists = dists.flatten()
+  
+if __name__=='__main__':
+  rospy.init_node('global_points')
+  rospy.Subscriber("/tf",TFMessage,callback_loc)
+  rospy.Subscriber("/camera/depth/points",Image,callback_depth)
+  pub = rospy.Publisher('/global_points', numpy_msg(Floats), queue_size=100)
+  rate = rospy.Rate(10)
+  while not rospy.is_shutdown():
+    pub.publish(dists)
+    rate.sleep()

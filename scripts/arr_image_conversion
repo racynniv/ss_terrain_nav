@@ -1,0 +1,22 @@
+#!/usr/bin/env python
+
+import rosbag
+import rospy
+import numpy as np
+import cv2
+from std_msgs.msg import Float32MultiArray
+from PIL import Image
+
+def callback(msg):
+  depth = np.reshape(np.array(msg.data),(480,640))
+  depth = np.ones((480,640)) - depth
+  depth *= 255
+  depth = depth.astype(np.uint8)
+  depth = np.flip(depth, axis=0)
+  im = Image.fromarray(depth)
+  im.save("img.png","PNG")
+
+if __name__=='__main__':
+  rospy.init_node('depth_test')
+  rospy.Subscriber('/camera/depth/points',Float32MultiArray,callback)
+  rospy.spin()

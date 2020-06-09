@@ -1,0 +1,31 @@
+#!/usr/bin/env python
+
+import rosbag
+import rospy
+import numpy as np
+import cv2
+from cv_bridge import CvBridge, CvBridgeError
+from sensor_msgs.msg import Image
+
+depthPub8 = rospy.Publisher("/depth8",Image,queue_size=100)
+depthPub16 = rospy.Publisher("/depth16",Image,queue_size=100)
+bridge = CvBridge()
+
+def callback(msg):
+  global depthPub8
+  global depthPub16
+  global bridge
+  img8 = bridge.imgmsg_to_cv2(msg,desired_encoding='8UC1')
+  print(img8.max())
+  depthPub8.publish(bridge.cv2_to_imgmsg(img8,'mono8'))
+  img16 = bridge.imgmsg_to_cv2(msg,desired_encoding='8UC1')
+  img16 = img16.astype(np.uint8)
+  img16 = cv2.applyColorMap(img16,cv2.COLORMAP_RAINBOW)
+  print(img16.max())
+  print(1)
+  depthPub16.publish(bridge.cv2_to_imgmsg(img16,'rgb8'))
+
+if __name__=='__main__':
+  rospy.init_node('depth_image_test')
+  rospy.Subscriber('/camera/depth/image',Image,callback)
+  rospy.spin()
