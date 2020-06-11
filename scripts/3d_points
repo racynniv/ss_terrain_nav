@@ -11,6 +11,7 @@ from rospy_tutorials.msg import Floats
 from sensor_msgs.msg import PointCloud2
 from tf2_msgs.msg import TFMessage
 from sensor_msgs.msg import Image
+from std_msgs.msg import Float32MultiArray
 
 import numpy as np
 import cv2
@@ -30,7 +31,7 @@ dists = np.empty((v_res*u_res*4))
 v_arr = np.repeat(np.reshape(np.sin((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
 u_arr = np.repeat(np.reshape(np.sin((np.arange(u_res)-u_res/2)*focal_length/u_res),(u_res,1)),v_res,axis=1)
 
-def H_mult(self, quaternion0, quaternion1):
+def H_mult(quaternion0, quaternion1):
     x0, y0, z0, w0 = np.split(quaternion0, 4, axis=-1)
     x1, y1, z1, w1 = np.split(quaternion1, 4, axis=-1)
     return np.concatenate(
@@ -68,15 +69,13 @@ def callback_depth(msg):
   v_res = 640
   u_res = 480
   focal_length = 57 * 3.14/180
-  bridge = CvBridge()
-  depth = bridge.imgmsg_to_cv2(msg,'16UC1')
-  print(depth.shape)
+  depth = msg.data
   depth = np.reshape(np.asarray(depth),(u_res,v_res))
   array = np.zeros((u_res,v_res,4))
-  array[:,:,3] = far_clip * depth + near_clip
+  array[:,:,3] = far_clip*(np.ones((480,640))-depth) + near_clip
   array[:,:,1] = np.multiply(array[:,:,3],u_arr)
   array[:,:,2] = np.multiply(array[:,:,3],v_arr)
-  dists = H_mult(None,H_mult(None,quat, array),rquat)
+  dists = H_mult(H_mult(quat, array),rquat)
   dists = np.reshape(dists,(480,640,4))
   dists = dists[:,:,1:] + trans
   dists = dists.astype(np.float32)
@@ -85,7 +84,7 @@ def callback_depth(msg):
 if __name__=='__main__':
   rospy.init_node('global_points')
   rospy.Subscriber("/tf",TFMessage,callback_loc)
-  rospy.Subscriber("/camera/depth/points",Image,callback_depth)
+  rospy.Subscriber("/camera/depth/points",Float32MultiArray,callback_depth)
   pub = rospy.Publisher('/global_points', numpy_msg(Floats), queue_size=100)
   rate = rospy.Rate(10)
   while not rospy.is_shutdown():

@@ -3,16 +3,178 @@
 import rosbag
 import rospy
 import numpy as np
+from PIL import Image
 import cv2
-from cv_bridge import CvBridge, CvBridgeError
+import glob, os
+import re
 
-i = 0
-bridge = CvBridge()
-for topic, msg, t in rosbag.Bag('_2020-06-08-23-10-31.bag').read_messages():
+near_clip = .01
+far_clip = 3.5
+v_res = 640
+u_res = 480
+focal_length = 57 * 3.14/180
+dists = np.empty((v_res*u_res*4))
+
+v_arr = np.repeat(np.reshape(np.sin((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
+u_arr = np.repeat(np.reshape(np.sin((np.arange(u_res)-u_res/2)*focal_length/u_res),(u_res,1)),v_res,axis=1)
+
+#parses data to get images, tf, and accelerometer data
+def parse_data(bagfile):
+  bag = rosbag.Bag(bagfile)
+
+  accel = np.empty((0,4))
+  tf = np.empty((0,8))
+  depth_t = []
+
+  for topic, msg, t in bag.read_messages():
     if topic == "/camera/depth/points":
-        data = bridge.imgmsg_to_cv2(msg,desired_encoding='16UC1')
-        cv2.imwrite("depth_{}.png".format(t),data)
-        i += 1
-        print(i)
-    #elif topic == "/global_points":
-        #points.append(msg)
+      depth = np.reshape(np.array(msg.data),(480,640))
+      depth = np.ones((480,640)) - depth
+      depth *= 255
+      depth = depth.astype(np.uint8)
+      depth = np.flip(depth, axis=0)
+      im = Image.fromarray(depth)
+      im.save("depth_{}.png".format(t.to_sec()),"PNG")
+      depth_t.append(t.to_sec())
+    elif topic == "/accelerationVec":
+      accel = np.vstack((accel,np.array([msg.x, msg.y, msg.x, t.to_sec()])))
+    elif topic == "/tf":
+      if msg.transforms[0].child_frame_id == 'ackerman':
+        t_x = msg.transforms[0].transform.translation.x
+        t_y = msg.transforms[0].transform.translation.y
+        t_z = msg.transforms[0].transform.translation.z
+        r_w = msg.transforms[0].transform.rotation.w
+        r_x = msg.transforms[0].transform.rotation.x
+        r_y = msg.transforms[0].transform.rotation.y
+        r_z = msg.transforms[0].transform.rotation.z
+        tf = np.vstack((tf,np.array([t_x,t_y,t_z,r_w,r_x,r_y,r_z,t.to_sec()])))
+  
+  depth_t.sort()
+  accel = np.sort(accel)
+  tf = np.sort(tf)
+  
+  return depth_t, accel, tf
+
+#correlates images with tf values, and x,y locations with accelerometer values
+def correlate_msgs(depth_t, accel, tf):
+  t = 1
+  d_tf = {}
+  a_tf = np.empty((0,10))
+  for d in depth_t:
+    while t < tf.shape[0]-1 and tf[t,-1] < d:
+      t += 1
+      
+    if abs(tf[t,-1]-d) < abs(tf[t-1,-1]-d):
+      d_tf[round(d,2)] = tf[t]
+    else:
+      d_tf[round(d,2)] = tf[t-1]
+  t = 1
+  for a in accel:
+    while t < tf.shape[0]-1 and tf[t,-1] < a[-1]:
+      t += 1
+    if abs(tf[t,-1]-a[-1]) < abs(tf[t-1,-1]-a[-1]):
+      a_tf = np.vstack((a_tf,np.append(tf[t,:-1],a[:-1])))
+    else:
+      a_tf = np.vstack((a_tf,np.append(tf[t-1,:-1],a[:-1])))
+  
+  return d_tf, a_tf
+  
+#returns index values for the terrain grids given an x,y,max size,grid unit size, and grid center
+def index_values(x,y,t_size, g_size, center):
+  cell_n = int(t_size//g_size)
+  i = int(x/g_size+cell_n/2-center[0]/g_size)
+  j = int(y/g_size+cell_n/2-center[1]/g_size)
+  return i,j
+  
+# turns the tf values into a grid for ease of searching 
+def tf_to_grid(a_tf, t_size, g_size, center=(0,0)):
+  cell_n = int(t_size//g_size)
+  
+  tf_grid = np.zeros((cell_n,cell_n,),dtype=object)
+  
+  for p in a_tf:
+    i,j = index_values(p[0],p[1],t_size, g_size, center)
+    if tf_grid[i,j] is None:
+      tf_grid[i,j] = p[4:]
+    else:
+      tf_grid[i,j] = np.append(tf_grid[i,j],p[4:])
+  
+  return tf_grid
+  
+#finds rotation in 3d from a given quaternion for point projection
+def H_mult(quaternion0, quaternion1):
+    x0, y0, z0, w0 = np.split(quaternion0, 4, axis=-1)
+    x1, y1, z1, w1 = np.split(quaternion1, 4, axis=-1)
+    return np.concatenate(
+        (x1*w0 + y1*z0 - z1*y0 + w1*x0,
+         -x1*z0 + y1*w0 + z1*x0 + w1*y0,
+         x1*y0 - y1*x0 + z1*w0 + w1*z0,
+         -x1*x0 - y1*y0 - z1*z0 + w1*w0),
+        axis=-1)
+
+#correlates image pixels with global points
+def global_points(depth_filename, tf):
+  global near_clip
+  global far_clip
+  global v_arr
+  global u_arr
+  t_x = tf[0]
+  t_y = tf[1]
+  t_z = tf[2]
+  r_w = tf[3]
+  r_x = tf[4]
+  r_y = tf[5]
+  r_z = tf[6]
+  trans = np.array([t_x, t_y, t_z])
+  quat = np.array([r_w, r_x, r_y, r_z])
+  rquat = np.array([r_w, -r_x, -r_y, -r_z])
+  
+  image = cv2.imread(depth_filename,0)
+  image *= 255
+  image = np.ones((480,640)) - image
+  array = np.zeros((480,640,4))
+  array[:,:,3] = far_clip * image + near_clip
+  array[:,:,1] = np.multiply(array[:,:,3],u_arr)
+  array[:,:,2] = np.multiply(array[:,:,3],v_arr)
+  dists = H_mult(H_mult(quat, array),rquat)
+  dists = np.reshape(dists,(480,640,4))
+  dists = dists[:,:,1:] + trans
+  
+  return dists
+  
+#gives points that have been explored in given image
+def label_image_points(points, tf_grid, t_size, g_size, center=(0,0)):
+  found = np.empty((0,2))
+  for i in range(points.shape[0]):
+    for j in range(points.shape[1]):
+      x,y = index_values(points[i,j,0],points[i,j,1],t_size,g_size,center)
+      if 0 <= x < 99 and 0<= y < 99:
+        if tf_grid[x,y] is None:
+          continue
+        found = np.vstack((found,[x,y]))
+  if len(found) != 0:
+    found = np.unique(found,axis=0)
+  return found
+
+
+if __name__=='__main__':
+  depth_t,accel,tf = parse_data('_2020-06-09-17-39-53.bag')
+  d_tf, a_tf = correlate_msgs(depth_t,accel,tf)
+  tf_grid = tf_to_grid(a_tf, 10, .1)
+  print(depth_t[0])
+  dist = global_points('depth_1591738793.61.png',d_tf[round(depth_t[0],2)])
+  print(dist)
+  """
+  os.chdir(".")
+  for file in glob.glob("*.png"):
+    time_stamp = re.findall("depth_(\d+).png",file)
+    if not time_stamp: continue
+    print(time_stamp)
+    time = float(time_stamp[0])/1000000000
+    time = round(time,2)
+    dist = global_points(file,d_tf[time])
+    found = label_image_points(dist,tf_grid,10,.1)
+    print(found)
+    print(1)
+  print(2)
+  """
