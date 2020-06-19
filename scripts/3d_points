@@ -7,6 +7,7 @@ import ros_numpy
 from scipy.spatial.transform import Rotation as R
 from rospy.numpy_msg import numpy_msg
 from rospy_tutorials.msg import Floats
+from pyquaternion import Quaternion
 
 from sensor_msgs.msg import PointCloud2
 from tf2_msgs.msg import TFMessage
@@ -16,6 +17,7 @@ from std_msgs.msg import Float32MultiArray
 import numpy as np
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
+from numpy import savetxt
 
 trans = np.array([])
 quat = np.array([])
@@ -26,20 +28,13 @@ far_clip = 3.5
 v_res = 640
 u_res = 480
 focal_length = 57 * 3.14/180
-dists = np.empty((v_res*u_res*4))
+dists = np.empty((u_res,v_res,3))
 
-v_arr = np.repeat(np.reshape(np.sin((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
-u_arr = np.repeat(np.reshape(np.sin((np.arange(u_res)-u_res/2)*focal_length/u_res),(u_res,1)),v_res,axis=1)
-
-def H_mult(quaternion0, quaternion1):
-    x0, y0, z0, w0 = np.split(quaternion0, 4, axis=-1)
-    x1, y1, z1, w1 = np.split(quaternion1, 4, axis=-1)
-    return np.concatenate(
-        (x1*w0 + y1*z0 - z1*y0 + w1*x0,
-         -x1*z0 + y1*w0 + z1*x0 + w1*y0,
-         x1*y0 - y1*x0 + z1*w0 + w1*z0,
-         -x1*x0 - y1*y0 - z1*z0 + w1*w0),
-        axis=-1)
+s_phi = np.repeat(np.reshape(np.sin((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
+c_phi = np.repeat(np.reshape(np.cos((np.arange(v_res)-v_res/2)*focal_length/v_res),(1,v_res)),u_res,axis=0)
+#flipped sin and cos to account for -a term
+c_theta = np.repeat(np.reshape(np.sin((u_res/2-np.arange(u_res))*focal_length/u_res),(u_res,1)),v_res,axis=1)
+s_theta = np.repeat(np.reshape(np.cos((u_res/2-np.arange(u_res))*focal_length/u_res),(u_res,1)),v_res,axis=1)
 
 def callback_loc(data):
   global trans
@@ -54,15 +49,16 @@ def callback_loc(data):
     rot_z = data.transforms[0].transform.rotation.z
     rot_w = data.transforms[0].transform.rotation.w
     trans = np.array([loc_x, loc_y, loc_z])
-    quat = np.array([rot_w, rot_x, rot_y, rot_z])
-    rquat = np.array([rot_w, -rot_x, -rot_y, -rot_z])
+    quat = np.array([rot_x, rot_y, rot_z, rot_w])
   
+
 def callback_depth(msg):
   global trans
   global quat
-  global rquat
-  global u_arr
-  global v_arr
+  global c_phi
+  global s_phi
+  global c_theta
+  global s_theta
   global dists
   near_clip = .01
   far_clip = 3.5
@@ -71,15 +67,18 @@ def callback_depth(msg):
   focal_length = 57 * 3.14/180
   depth = msg.data
   depth = np.reshape(np.asarray(depth),(u_res,v_res))
-  array = np.zeros((u_res,v_res,4))
-  array[:,:,3] = far_clip*(np.ones((480,640))-depth) + near_clip
-  array[:,:,1] = np.multiply(array[:,:,3],u_arr)
-  array[:,:,2] = np.multiply(array[:,:,3],v_arr)
-  dists = H_mult(H_mult(quat, array),rquat)
-  dists = np.reshape(dists,(480,640,4))
-  dists = dists[:,:,1:] + trans
+  array = np.zeros((u_res,v_res,3))
+  distances = (far_clip-near_clip)*(np.ones((480,640))-depth) + near_clip
+  
+  array[:,:,2] = np.multiply(distances,c_theta)
+  array[:,:,1] = np.multiply(np.multiply(distances,s_theta),c_phi)
+  array[:,:,0] = np.multiply(np.multiply(distances,s_theta),s_phi)
+  r = R.from_quat(quat)
+  for i in range(dists.shape[0]):
+    dists[i,:,:] = r.apply(array[i])
+  dists = dists + trans
   dists = dists.astype(np.float32)
-  dists = dists.flatten()
+  
   
 if __name__=='__main__':
   rospy.init_node('global_points')

@@ -34,25 +34,18 @@ def pick_random(max_x, min_x, max_y, min_y):
   y = random.uniform(max_y, min_y)
   return x,y
   
-"""
-def callback_accel(msg):
-  global startPub
-  global stopPub
-  global closePub
-  x = msg.x
-  y = msg.y
-  z = msg.z
-  acceptable_angle = 80*np.pi/180
-  
-  xy_dist = np.sqrt(x**2 + y**2)
-  angle = np.arctan2(xy_dist,np.abs(z))
-  
-  if angle > acceptable_angle:
+def check_landed():
+  global landed
+  global last_t
+  if landed:
     stopPub.publish(True)
     closePub.publish(True)
     rospy.sleep(1)
+    last_t += 3
+    landed = False
     startPub.publish(True)
-"""
+  else:
+    landed = True
   
 def callback_close(msg):
   close = msg.data
@@ -77,7 +70,6 @@ def callback_loc(data):
   global last_y
   global last_z
   global last_t
-  global landed
   if data.transforms[0].child_frame_id == 'ackerman':
     if data.transforms[0].header.stamp.secs - last_t > 1.5:
       x = data.transforms[0].transform.translation.x
@@ -109,16 +101,17 @@ def callback_loc(data):
       last_y = y
       last_z = z
       last_t = data.transforms[0].header.stamp.secs
-      if delta_d < .05 or dot_prod < .93 or angle > acceptable_angle:
-        if landed:
-          stopPub.publish(True)
-          closePub.publish(True)
-          rospy.sleep(1)
-          last_t += 3
-          landed = False
-          startPub.publish(True)
-        else:
-          landed = True
+      if delta_d < .05:
+        check_landed()
+        #print("delta_d")
+      if dot_prod < .9:
+        check_landed()
+        #print(dot_prod)
+        #print("dot_prod")
+      if angle > acceptable_angle:
+        check_landed()
+        #print("angle")
+
   
   
 if __name__=='__main__':
