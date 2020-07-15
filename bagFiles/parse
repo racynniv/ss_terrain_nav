@@ -9,7 +9,9 @@ import glob, os
 import re
 from scipy.spatial.transform import Rotation as R
 from datetime import datetime
+import pickle
 
+#variables for conversion from depth array to image and global points
 near_clip = .01
 far_clip = 3.5
 v_res = 640
@@ -19,7 +21,7 @@ dists = np.empty((v_res*u_res*4))
 
 s_phi = np.repeat(np.reshape(np.sin((v_res/2-np.arange(v_res))*focal_length/v_res),(1,v_res)),u_res,axis=0)
 c_phi = np.repeat(np.reshape(np.cos((v_res/2-np.arange(v_res))*focal_length/v_res),(1,v_res)),u_res,axis=0)
-#flipped sin and cos to account for -a term
+#flipped sin and cos to account for -a phase shift term
 c_theta = np.repeat(np.reshape(np.sin((u_res/2-np.arange(u_res))*focal_length/u_res),(u_res,1)),v_res,axis=1)
 s_theta = np.repeat(np.reshape(np.cos((u_res/2-np.arange(u_res))*focal_length/u_res),(u_res,1)),v_res,axis=1)
 
@@ -40,12 +42,10 @@ def parse_data(bagfile):
       depth = np.flip(depth, axis=0)
       im = Image.fromarray(depth)
       d = ImageDraw.Draw(im)
-      #d.point([0,0,0,1,1,0,1,1,2,0,2,1,2,2,1,2,0,2],fill='red')
-      #d.point([-1,-1,-2,-1,-2,-2,-1,-2],fill='red')
-      im.save("depth_{}.png".format(t.to_sec()),"PNG")
       depth_t.append(t.to_sec())
+      im.save("depth_{}.png".format(round(depth_t[-1],2)),"PNG")
     elif topic == "/accelerationVec":
-      accel = np.vstack((accel,np.array([msg.x, msg.y, msg.x, t.to_sec()])))
+      accel = np.vstack((accel,np.array([msg.x, msg.y, msg.z, t.to_sec()])))
     elif topic == "/tf":
       if msg.transforms[0].child_frame_id == 'ackerman':
         t_x = msg.transforms[0].transform.translation.x
@@ -58,8 +58,8 @@ def parse_data(bagfile):
         tf = np.vstack((tf,np.array([t_x,t_y,t_z,r_w,r_x,r_y,r_z,t.to_sec()])))
   
   depth_t.sort()
-  accel = np.sort(accel)
-  tf = np.sort(tf)
+  accel = accel[accel[:,-1].argsort()]
+  tf = tf[tf[:,-1].argsort()]
   
   return depth_t, accel, tf
 
@@ -102,17 +102,18 @@ def index_values(x,y,t_size, g_size, center=(0,0)):
 def tf_to_grid(a_tf, t_size, g_size, center=(0,0)):
   cell_n = int(t_size//g_size)
   
-  tf_grid = np.zeros((cell_n,cell_n,),dtype=object)
+  tf_grid = {}
   tf_index = np.empty((0,2),dtype=np.int)
   i,j = index_values(a_tf[:,0],a_tf[:,1],t_size,g_size)
   
   for c in range(len(i)):
     x = i[c]
     y = j[c]
-    if tf_grid[x,y] is None:
-      tf_grid[x,y] = a_tf[c,4:]
+    if (x,y) not in tf_grid.keys():
+      tf_grid[(x,y)] = []
+      tf_grid[(x,y)].append(list(a_tf[c]))
     else:
-      tf_grid[x,y] = np.append(tf_grid[x,y],a_tf[c,4:])
+      tf_grid[(x,y)].append(list(a_tf[c]))
       tf_index = np.vstack((tf_index,[x,y]))
   
   tf_index = np.unique(tf_index,axis=0)
@@ -137,8 +138,11 @@ def global_points(depth_filename, tf):
   quat = np.array([r_x, r_y, r_z, r_w])
   trans = np.array([t_x, t_y, t_z])
   depth = cv2.imread(depth_filename,0)
+  print(depth_filename)
   depth = depth.astype(np.float32)
   depth /= 255
+  inf_dist = np.argwhere(depth==0)
+  depth[inf_dist[:,0],inf_dist[:,1]] = -1000
   xyz = np.empty((u_res,v_res,3))
   distances = (far_clip-near_clip)*(np.ones(depth.shape)-depth) + near_clip
   xyz[:,:,2] = np.multiply(distances,c_theta)
@@ -151,32 +155,42 @@ def global_points(depth_filename, tf):
   return xyz
   
 #gives points that have been explored in given image
-def label_image_points(points, tf_index, t_size, g_size, center=(0,0)):
-  found = np.empty((0,2))
+def label_image_points(points, tf_index, tf_grid, tf, t_size, g_size, center=(0,0)):
+  rot_a = {}
   max_ind = int(t_size//g_size)-1
-  x,y = index_values(points[:,:,0],points[:,:,1],t_size,g_size,center)
-  x = np.reshape(x,(-1))
-  y = np.reshape(y,(-1))
-  x_lt = x<max_ind
-  x_gt = 0<=x
-  y_lt = y<max_ind
-  y_gt = 0<=y
-  x_lim = np.logical_and(x_lt,x_gt)
-  y_lim = np.logical_and(y_lt,y_gt)
-  in_range = np.logical_and(x_lim,y_lim)
-  x = x[in_range]
-  y = y[in_range]
+  x_p,y_p = index_values(points[:,:,0],points[:,:,1],t_size,g_size,center)
+  values = np.ones((points.shape[0],points.shape[1],2))*-1
+  x = np.reshape(x_p,(-1))
+  y = np.reshape(y_p,(-1))
   indices = zip(x,y)
-  found = set(tf_index).intersection(indices)
-  found = np.array(list(map(list,found)))
-  return found
+  unique = list(set(tf_grid.keys()) & set(indices))
+  both = set(indices).intersection(tf_grid.keys())
+  true_index = [indices.index(a) for a in both]
+  rotated_vecs = {}
+  tf_cur = R.from_quat(tf[3:7])
+  
+  for loc in unique:
+    vecs = np.array(tf_grid[loc])
+    tf_far = R.from_quat(vecs[:,3:7])
+    accels = vecs[:,-3:]
+    rot = tf_cur * tf_far.inv()
+    rotated_vecs[loc] = rot.apply(accels)
+    
+  for i in true_index:
+    j_t = int(i%x_p.shape[1])
+    i_t = int(np.floor(i/x_p.shape[1]))
+    values[i_t,j_t] = [i_t,j_t]
+    index = tuple((i_t,j_t))
+    tup = tuple((x_p[i_t,j_t],y_p[i_t,j_t]))
+    rot_a[index] = rotated_vecs[tup]
+    
+  return rot_a, values
   
   
 def extract_data(bagFile):
   depth_t,accel,tf = parse_data(bagFile)
   d_tf, a_tf = correlate_msgs(depth_t,accel,tf)
   tf_grid, tf_index = tf_to_grid(a_tf, 10, .1)
-  np.save("tf_grid.npy",tf_grid)
   for time in depth_t:
     time = round(time,2)
     now = datetime.now()
@@ -185,14 +199,23 @@ def extract_data(bagFile):
     now = datetime.now()
     print(now.strftime("%H:%M:%S"))
     x,y = index_values(dist[:,:,0],dist[:,:,1],10,.1)
-    found = label_image_points(dist,tf_index,10,.1)
+    found_dict, value_array = label_image_points(dist,tf_index,tf_grid,d_tf[time],10,.1)
     now = datetime.now()
     print(now.strftime("%H:%M:%S"))
     print(1)
-    np.save("found_{}.npy".format(time),found)
+    f = open("{}.pkl".format(time),"wb")
+    pickle.dump(found_dict,f)
+    f.close()
+    np.save("indices_{}.npy".format(time),value_array)
+  return depth_t
 
 
 if __name__=='__main__':
+  """
+  dat = extract_data("_2020-06-26-16-27-48.bag")
+  """
+  names = []
+  base_dir = os.getcwd()
   for d in os.listdir('.'):
     if os.path.isdir(d):
       os.chdir(d)
@@ -203,10 +226,11 @@ if __name__=='__main__':
         print(sd)
         for f in curr_dir:
           if f.endswith('.bag'):
-            extract_data(f)
-            if 'archive' not in curr_dir:
-              os.mkdir('archive/')
-            os.rename(f,'archive/{}'.format(f))
+            times = extract_data(f)
+            dir_l = [d+'/'+sd+'/']*len(times)
+            names.append(list(map(list,zip(dir_l,times))))
+            os.rename(f,'../../../archived/' + d + '/' + sd + '/{}'.format(f))
         os.chdir('..')
       os.chdir('..')
-
+  names = np.array(names)
+  np.save("dirs_and_files.npy",names)

@@ -1,4 +1,4 @@
-import tensorflow as tf
+#import tensorflow as tf
 import numpy as np
 import cv2
 import time
@@ -21,19 +21,20 @@ class Generator(object):
     # Initialize object with base level parameters
     def __init__(self,array,translate=[0,0],flip=[0,0],noise=0):
         # Store original dataset and parameter values
-        aug = np.zeros((array.shape[0],6))
+        aug = np.zeros((array.shape[0],5))
         self.array = np.hstack((array,aug))
         self.num_samples = array.shape[0]
         self.translate = translate
-        self.rotate = 0
+        #self.rotate = 0
         self.noise = noise
-        self.flip = [0,0]
+        self.flip = [[0,0]]
         if flip[0] == 1:
             self.flip.append([1,0])
         if flip[1] == 1:
             self.flip.append([0,1])
         if flip[0] == 1 and flip[1] == 1:
             self.flip.append([1,1])
+        self.flip = np.array(self.flip)
 
         # Create randomized parameters and augment data
         self.__randomize_params()
@@ -44,8 +45,9 @@ class Generator(object):
         ########## Check how to break this up in an appropriate way
         self.shift_width = np.random.randint(low=-self.translate[0],high=self.translate[0]) if self.translate[0] else 0
         self.shift_height = np.random.randint(low=-self.translate[1],high=self.translate[1]) if self.translate[1] else 0
-        self.curr_flip = np.random.choice(self.flip)
-        self.curr_rot = np.random.uniform(-self.rotate,self.rotate)
+        index = np.random.choice(range(self.flip.shape[0]))
+        self.curr_flip = self.flip[index]
+        #self.curr_rot = np.random.uniform(-self.rotate,self.rotate)
         self.curr_noise = np.random.uniform(0,self.noise)
 
     # Augment data using randomized parameters
@@ -85,11 +87,12 @@ class Generator(object):
             """
 
         # Rotate by random value
+        """
         if self.curr_rot != 0:
             shifted = np.array(self.array)
             shifted[:,6] = self.curr_rot
             self.array_aug = np.vstack((self.array_aug,shifted))
-            """
+            
             self.x_aug = np.vstack((self.x_aug,rotate(self.x,self.curr_rot,axes=(1,2),reshape=False)))
             self.y_aug = np.vstack((self.y_aug,self.y))
             """
@@ -97,7 +100,7 @@ class Generator(object):
         # Add noise to values
         if self.curr_noise != 0:
             shifted = np.array(self.array)
-            shifted[:,7] = self.curr_noise
+            shifted[:,6] = self.curr_noise
             self.array_aug = np.vstack((self.array_aug,shifted))
             """
             self.x_aug = np.vstack((self.x_aug,self.x+np.random.normal(0,self.curr_noise,self.x.shape)))
@@ -119,7 +122,7 @@ class Generator(object):
         while True:
             if count < total_poss:
                 count += 1
-                yield((self.array_aug[count*batch_size:(count+1)*batch_size]))
+                yield((np.array(self.array_aug[count*batch_size:(count+1)*batch_size])))
             else:
 
                 self.__randomize_params

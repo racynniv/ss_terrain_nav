@@ -1,10 +1,14 @@
 import tensorflow as tf
 import numpy as np
 import time
-from augment import Generator
+from augment_image_names import Generator
+from data_loader import load_batch
 import matplotlib.pyplot as plt
 
 """
+
+https://github.com/richzhang/colorization/blob/master/colorization/models/colorization_deploy_v2.prototxt
+
 This object is a convolutional neural network using tensorflow and a generator
 with data autmentation. The object initializes with scalars height, width, 
 channels, output size, learning rate, and l2 regularization. It also has a list 
@@ -31,32 +35,35 @@ trained model or loads the most recent checkpoint for predictions.
 """
 
 class cnn(object):
-    def __init__(self,height,width,channels,output_size,conv_featmap=[32,64],kernel_size=[5,5],conv_strides=[2,2],pool_size=[2,2],pool_strides=[2,2],fc_layer_size=[1024],learning_rate=0.01,lambda_l2_reg=.01,c_r='classification',train_keep_prob=[.7],activation=tf.nn.relu):
+    def __init__(self,height,width,channels,conv_featmap=[32,64],deconv_featmap=[64,32,3],
+                 kernel_size=[5,5],dekernel_size=[5,5,5],conv_strides=[1,1],deconv_strides=[1,1,1],
+                 pool_size=[2,2],pool_strides=[2,2],upsample_size=[2,2],learning_rate=0.01,
+                 lambda_l2_reg=.01,activation=tf.nn.relu):
         # Ensures that the hidden layers have corresponding keep probs
         assert len(conv_featmap) == len(kernel_size) and len(conv_featmap) == len(pool_size)
 
 
         # Sets variables for later use
-        self.output_size = output_size
         self.height = height
         self.width = width
         self.channels = channels
         self.conv_featmap = conv_featmap
+        self.deconv_featmap = deconv_featmap
         self.kernel_size = kernel_size
+        self.dekernel_size = dekernel_size
         self.conv_strides = conv_strides
+        self.deconv_strides = deconv_strides
         self.pool_size = pool_size
         self.pool_strides = pool_strides
-        self.fc_layer_size = fc_layer_size
+        self.upsample_size = upsample_size
         self.learning_rate = learning_rate
         self.lambda_l2_reg = lambda_l2_reg
-        self.c_r = c_r
-        self.train_keep_prob = train_keep_prob
         self.activation = activation
 
         # Creates NN using private functions
         self.__input_layer()
         self.__conv_layers()
-        self.__fc_layers()
+        self.__deconv_layers()
         self.__output_layer()
         self.__loss()
         self.__optimizer()
@@ -65,46 +72,43 @@ class cnn(object):
     # Creates the input layer using placeholders (assumes batches x 3 dim input)
     def __input_layer(self):
         self.inputs = tf.placeholder(tf.float32,shape=(None,self.height,self.width,self.channels))
-        self.targets = tf.placeholder(tf.int64,shape=(None,self.output_size))
+        self.targets = tf.placeholder(tf.int64,shape=(None,self.height,self.width,3))
+        self.output_tf = tf.placeholder(tf.bool,shape(None,self.height,self.width))
 
     # Creates convolutional layers (each conv layer followed by a pooling layer)
     def __conv_layers(self):
-        self.conv = tf.layers.conv2d(self.inputs, filters=self.conv_featmap[0],kernel_size=self.kernel_size[0],strides=self.conv_strides[0],padding="SAME",activation=self.activation)
-        self.pool = tf.nn.max_pool(self.conv, ksize=[1,self.pool_size[0],self.pool_size[0],1],strides=[1,self.pool_strides[0],self.pool_strides[0],1],padding="VALID")
+        self.conv = tf.layers.conv2d(self.inputs, filters=self.conv_featmap[0],
+                                     kernel_size=self.kernel_size[0],strides=self.conv_strides[0],
+                                     padding="SAME",activation=self.activation)
+        self.pool = tf.nn.max_pool(self.conv, ksize=[1,self.pool_size[0],self.pool_size[0],1],
+                                   strides=[1,self.pool_strides[0],self.pool_strides[0],1],padding="VALID")
 
         for i in range(1,len(self.conv_featmap)):
-            self.conv = tf.layers.conv2d(self.pool, filters=self.conv_featmap[i],kernel_size=self.kernel_size[i],strides=self.conv_strides[i],padding="SAME",activation=self.activation)
-            self.pool = tf.nn.max_pool(self.conv, ksize=[1,self.pool_size[i],self.pool_size[i],1],strides=[1,self.pool_strides[i],self.pool_strides[i],1],padding="VALID")
+            self.conv = tf.layers.conv2d(self.pool, filters=self.conv_featmap[i],kernel_size=self.kernel_size[i],
+                                         strides=self.conv_strides[i],padding="SAME",activation=self.activation)
+            self.pool = tf.nn.max_pool(self.conv, ksize=[1,self.pool_size[i],self.pool_size[i],1],
+                                       strides=[1,self.pool_strides[i],self.pool_strides[i],1],padding="VALID")
 
-    # Takes inputs and puts them through fully connected layers with dropout
-    def __fc_layers(self):
-
-        # Reshapes data into a flattened shape for fully connected layer
-        pool_shape = self.pool.get_shape()
-        self.fc = tf.reshape(self.pool,shape=[-1,pool_shape[1].value*pool_shape[2].value*pool_shape[3].value])
-
-        for i in range(len(self.fc_layer_size)):
-            self.fc=tf.layers.dense(self.fc,self.fc_layer_size[i],
-                                        activation=self.activation)
-            self.fc=tf.layers.dropout(self.fc,
-                                          rate=self.train_keep_prob[i])
+    def __deconv_layers(self):
+      for i in range(len(self.deconv_featmap)-1):
+        self.pool = tf.layers.conv2d(self.deconv, filters=self.deconv_featmap[i],kernel_size=self.dekernel_size[i],
+                                              strides=self.deconv_strides[i],padding="SAME",activation=self.activation)
+        new_h = tf.shape(self.pool)[1]*self.upsample_size[i]
+        new_w = tf.shape(self.pool)[2]*self.upsample_size[i]
+        self.deconv = tf.image.resize(self.pool, size=[new_h,new_w])
+        
+      self.deconv = tf.layers.conv2d(self.deconv, filters=self.deconv_featmap[-1],kernel_size=self.dekernel_size[-1],
+                                     strides=self.deconv_strides[-1],padding="SAME",activation=self.activation)
 
     # Takes output of FC layer and creates an output of output_size
     # (This does not have dropout because it is the output layer)
     def __output_layer(self):
-        self.output = tf.layers.dense(self.fc,self.output_size)
+        self.output = tf.multiply(self.output_tf,self.deconv)
 
     # Defines loss based on if the output is a regression or classification. If 
     # classification, use softmax, if regression, use mean squared error
     def __loss(self):
-        if self.c_r == 'regression':
-            self.loss = tf.losses.mean_squared_error(self.targets,self.output)
-        elif self.c_r == 'classification':
-            self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-                                       labels=self.targets,logits=self.output))
-            self.pred = tf.argmax(input=self.output,axis=1)
-        else:
-            raise ValueError('Not regresson or classification')
+        self.loss = tf.losses.mean_squared_error(self.targets,self.output)
 
     # Minimizes the loss using an Adam optimizer
     def __optimizer(self):
@@ -113,14 +117,16 @@ class cnn(object):
 
     # Trains the network based on the train inputs given and uses the test set
     # to test accuracy on a non training set
-    def train(self,train_x,train_y,test_x,test_y,epochs=20,batch_size=64,
-              translate=[0,0],flip=[0,0],rotate=0,noise=0,model_name=None,
-              pre_trained_model=None):
+    def train(self,train_names,test_names,base_dir,epochs=20,
+              batch_size=64,test_batch_size=64,translate=[0,0],
+              flip=[0,0],noise=0,model_name=None,pre_trained_model=None):
 
         # Create the generator to output batches of data with given transforms
-        gen = Generator(train_x,train_y,translate=translate,flip=flip,
-                        rotate=rotate,noise=noise)
+        gen = Generator(train_names,translate=translate,flip=flip,noise=noise)
         next_batch = gen.gen_batch(batch_size)
+        
+        test_gen = Generator(test_names)
+        test_batch = test_gen.gen_batch(test_batch_size)
 
         # Set number of iterations (SIZE CAN BE CHANGED BECAUSE OF GENERATOR)
         aug_size = gen.aug_size()
@@ -157,8 +163,9 @@ class cnn(object):
                     iter_tot += 1
 
                     # Create feed values using the generator
-                    (feed_x,feed_y) = next(next_batch)
-                    feed = {self.inputs: feed_x, self.targets: feed_y}
+                    feed_names = next(next_batch)
+                    feed_image, feed_accels, feed_tf = load_batch(feed_names,base_dir)
+                    feed = {self.inputs: feed_image, self.targets: feed_accels, self.output_tf: feed_tf}
 
                     # Feed values to optimizer and output loss (for printing)
                     _, cur_loss = sess.run([self.optimizer,self.loss],
@@ -167,19 +174,21 @@ class cnn(object):
 
                     # After 100 iterations, check if test accuracy has increased
                     if iter_tot % 100 == 0:
+                        feed_test = next(test_batch)
+                        test_images, test_accels, test_tf = load_batch(feed_test,base_dir)
                         pred = sess.run([self.pred],feed_dict={self.inputs:
-                                            test_x, self.targets: test_y})
-                        act = np.argmax(test_y,axis=1)
-                        val_acc = np.mean(np.argmax(test_y,axis=1)==pred)*100
-                        if val_acc > best_acc:
+                                        test_images, self.targets: test_accels, 
+                                        self.output_tf: test_tf})
+                        mse = np.mean((pred-test_accels)**2)
+                        if mse < best_mse:
                             print('Best validation accuracy! iteration:'
-                                  '{} accuracy: {}%'.format(iter_tot, val_acc))
-                            best_acc = val_acc
+                                  '{} mse: {}%'.format(iter_tot, mse))
+                            best_mse = mse
                             self.saver.save(sess,'model/{}'.format(
                                             cur_model_name))
 
         print("Traning ends. The best valid accuracy is {}." \
-               " Model named {}.".format(best_acc, cur_model_name))
+               " Model named {}.".format(best_mse, cur_model_name))
 
     # Plot training losses from most recent session
     def plot(self):
